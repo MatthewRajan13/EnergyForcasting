@@ -1,6 +1,7 @@
 import json
 import requests
 import warnings
+
 warnings.simplefilter(action='ignore', category=FutureWarning)
 import pandas as pd
 import numpy as np
@@ -8,9 +9,19 @@ import nasdaqdatalink as ndl
 from datetime import datetime
 from datetime import timedelta
 from scipy import stats
-import torch
-import torch.nn as nn
-import numpy as np
+
+import yfinance as yf
+from sklearn.model_selection import train_test_split
+
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+
+# import math
+# import torch
+# import torch.nn as nn
+# from torch.utils.data import TensorDataset, DataLoader
+# import torch.optim as optim
 
 GAS_EIA = {
     'U.S. Ending Stocks of Total Gasoline, Weekly': 'PET.WGTSTUS1.W',
@@ -38,24 +49,127 @@ FRED_API = '115cf5baf63cb8d94c61290db6e49ed4'
 
 
 def main():
-    combined_df = get_combined_df(GAS_EIA)
+    # gas_or_crude = input("Gas or Crude? ")
+    gas_or_crude = "Gas"
+    combined_df = get_combined_df(gas_or_crude)
+    combined_df = combined_df
+    print(combined_df)
+    # pd.set_option('display.max_columns', None)
     normalized_df = stats.zscore(combined_df)
+    forecast(combined_df, normalized_df)
 
-    print(normalized_df)
 
-def get_combined_df(eia_choice):
-    eia_data = get_eia_data(GAS_EIA, EIA_API)
+def forecast(combined_df, normalized_df):
+    # All factors
+    cols = ['U.S. Ending Stocks of Total Gasoline, Weekly',
+            'U.S. Ending Stocks of Gasoline Blending Components, Weekly',
+            'U.S. Ending Stocks of Fuel Ethanol, Weekly',
+            'U.S. Imports of Finished Motor Gasoline, Weekly',
+            'U.S. Percent Utilization of Refinery Operable Capacity, Weekly',
+            'U.S. Refiner and Blender Net Input of Fuel Ethanol, Weekly',
+            'U.S. Refiner and Blender Net Input of Gasoline Blending Components, Weekly',
+            'Approval Index', 'Days til Midterms', 'Days til Presidential', 'Close', 'Volume']
+    axes = combined_df[cols].plot(figsize=(11, 9), subplots=True)
+    plt.show()
+
+    forecast_out = 10
+    print("Days forecasted out: ", forecast_out)
+    combined_df['label'] = combined_df['Close'].shift(forecast_out)
+    print(combined_df)
+
+    scaler = StandardScaler()
+    scaler.fit(normalized_df)
+    X = scaler.transform(normalized_df)
+
+    X_Predictions = X[(-forecast_out):]  # data to be predicted
+    X = X[:-forecast_out]  # data to be trained
+
+    combined_df.dropna(inplace=True)
+    y = np.array(combined_df['label'])
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    rf = RandomForestRegressor()
+    rf.fit(X_train, y_train)
+    rf_confidence = rf.score(X_test, y_test)
+
+    names = ['Random Forest']
+    columns = ['model', 'accuracy']
+    scores = [rf_confidence]
+    alg_vs_score = pd.DataFrame([[x, y] for x, y in zip(names, scores)], columns=columns)
+    print(alg_vs_score)
+
+    last_date = combined_df.index[-1]  # getting the last date in the dataset
+    last_unix = last_date.timestamp()  # converting it to time in seconds
+    one_day = 86400  # one day equals 86400 seconds
+    next_unix = last_unix + one_day  # getting the time in seconds for the next day
+    forecast_set = rf.predict(X_Predictions)  # predicting forecast data
+    combined_df['Forecast'] = np.nan
+    for i in forecast_set:
+        next_date = datetime.fromtimestamp(next_unix)
+        next_unix += 86400
+        combined_df.loc[next_date] = [np.nan for _ in range(len(combined_df.columns) - 1)] + [i]
+
+    print(rf.feature_importances_)
+
+    print(combined_df[['Close', 'Forecast']].tail(20))
+    plt.figure(figsize=(18, 8))
+    combined_df['Close'].tail(100).plot()
+    combined_df['Forecast'].plot()
+    plt.legend(loc=4)
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.show()
+
+
+def get_combined_df(gas_or_crude):
+    eia_choice = GAS_EIA
+    if gas_or_crude == "Gas":
+        eia_choice = GAS_EIA
+    elif gas_or_crude == "Crude":
+        eia_choice = CRUDE_EIA
+
+    eia_data = get_eia_data(eia_choice, EIA_API)
     pres_data = get_pres_appr_data()
     election_data = get_days_til_election_data()
-    fed_data = get_fed_funds_rate_data(NDL_API, START_DATE)
-    treas_data = get_int_adj_10yr_treas_data(NDL_API, START_DATE)
-
+    # fed_data = get_fed_funds_rate_data(NDL_API, START_DATE)
+    # treas_data = get_int_adj_10yr_treas_data(NDL_API, START_DATE)
+    # combined_data = pres_data
     combined_data = pd.merge(eia_data, pres_data, left_index=True, right_index=True)
     combined_data = pd.merge(combined_data, election_data, left_index=True, right_index=True)
-    combined_data = pd.merge(combined_data, fed_data, left_index=True, right_index=True)
-    combined_data = pd.merge(combined_data, treas_data, left_index=True, right_index=True)
+    # combined_data = pd.merge(combined_data, fed_data, left_index=True, right_index=True)
+    # combined_data = pd.merge(combined_data, treas_data, left_index=True, right_index=True)
+
+    price_data = get_price(gas_or_crude, combined_data)
+
+    combined_data = pd.merge(combined_data, price_data, left_index=True, right_index=True)
+
+    combined_data.index = combined_data.index.astype(str)
+    combined_data.index = pd.to_datetime(combined_data.index)
 
     return combined_data
+
+
+def get_price(gas_or_crude, combined_df):
+    start_date = START_DATE
+    start_date = start_date[0:4] + '-' + start_date[4:6] + "-" + start_date[6:]
+    end_date = str(combined_df.index[-1])
+    end_date = end_date[0:4] + '-' + end_date[4:6] + "-" + end_date[6:]
+
+    if gas_or_crude == "Gas":
+        price = yf.download('UGA', start_date, end_date)
+    if gas_or_crude == "Crude":
+        price = yf.download('USO', start_date, end_date)
+
+    price = price.drop('Open', axis=1)
+    price = price.drop('High', axis=1)
+    price = price.drop('Low', axis=1)
+    price = price.drop('Adj Close', axis=1)
+
+    price.index = price.index.strftime("%Y%m%d")
+    price.index = price.index.astype(int)
+
+    return price
 
 
 def fill_eia_data(eia_data, code_dict):
@@ -90,9 +204,10 @@ def fill_eia_data(eia_data, code_dict):
                 index_list.append(beg_date)
                 new_df.index = index_list
 
-                new_vals = [z+inc for z in new_vals]
+                new_vals = [z + inc for z in new_vals]
 
             new_vals.clear()
+
     return new_df
 
 
@@ -119,6 +234,20 @@ def get_eia_data(code_dict, api_key):
     output = output.astype(float)
 
     output = fill_eia_data(output, code_dict)
+
+    index_list = output.index.tolist()
+
+    last_date = index_list[-1]
+    last_datetime = datetime.strptime(str(last_date), "%Y%m%d")
+
+    while last_datetime <= datetime.now():
+        output = output.append(output.tail(1).squeeze(), ignore_index=True)
+
+        index_list.append(int(last_datetime.strftime("%Y%m%d")))
+        output.index = index_list
+
+        last_datetime = last_datetime + timedelta(days=1)
+
     return output
 
 
@@ -155,7 +284,7 @@ def fill_pres_data(pres_data):
             new_vals.clear()
         else:
             new_vals = []
-            curr = (pres_data['Approval Index'].loc[pres_data.index[i-count]])
+            curr = (pres_data['Approval Index'].loc[pres_data.index[i - count]])
             new_vals.append(curr)
 
             # Create new rows with interpolated values
@@ -216,7 +345,7 @@ def get_pres_appr_data():
     for i in range(len(combined_df)):
         if "No Polling" in combined_df['Approval Index'].loc[combined_df.index[i]] \
                 or "No polling" in combined_df['Approval Index'].loc[combined_df.index[i]]:
-            dup = combined_df['Approval Index'].loc[combined_df.index[i-1]]
+            dup = combined_df['Approval Index'].loc[combined_df.index[i - 1]]
             combined_df['Approval Index'].loc[combined_df.index[i]] = dup
 
     combined_df = combined_df.astype(int)
@@ -225,7 +354,8 @@ def get_pres_appr_data():
 
     for i in range(len(combined_df['Approval Index'])):
         if type(combined_df['Approval Index'].loc[combined_df.index[i]]) != int:
-            combined_df['Approval Index'].loc[combined_df.index[i]] = combined_df['Approval Index'].loc[combined_df.index[i-1]]
+            combined_df['Approval Index'].loc[combined_df.index[i]] = combined_df['Approval Index'].loc[
+                combined_df.index[i - 1]]
 
     return combined_df.astype(int)
 
@@ -294,7 +424,6 @@ def find_election_dates(curr_date, end_date):
 
 
 def get_days_til_election_data():
-
     curr_date = datetime.strptime(START_DATE, "%Y%m%d")
     end_date = datetime.now()
 
@@ -337,6 +466,9 @@ def get_days_til_election_data():
 
     zipped = list(zip(days_til_mid, days_til_pres))
     combined_df = pd.DataFrame(zipped, columns=['Days til Midterms', 'Days til Presidential'])
+
+    index_list = [date for date in index_list if date <= int(end_date.strftime("%Y%m%d"))]
+    combined_df = combined_df[combined_df.index < len(index_list)]
     combined_df.index = index_list
 
     return combined_df
