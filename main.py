@@ -13,9 +13,14 @@ from scipy import stats
 import yfinance as yf
 from sklearn.model_selection import train_test_split
 
+import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
+
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # import math
 # import torch
@@ -42,7 +47,7 @@ CRUDE_EIA = {
     'U.S. Refiner Net Input of Crude Oil, Weekly': 'PET.WCRRIUS2.W',
 }
 
-START_DATE = '20120918'  # 10 year back-test (Friday)
+START_DATE = '20100718'
 EIA_API = 'LPJxIMy69I8faXYsn4Ggo0z93f1SMXTwBxSiqvTh'
 NDL_API = 'tH1_rNukQF2kHwQxi1xH'
 FRED_API = '115cf5baf63cb8d94c61290db6e49ed4'
@@ -50,54 +55,50 @@ FRED_API = '115cf5baf63cb8d94c61290db6e49ed4'
 
 def main():
     # gas_or_crude = input("Gas or Crude? ")
+    # if gas_or_crude != "Gas" and gas_or_crude != "Crude":
+    #     print("ERROR: INVALID CHOICE")
+    #     return
     gas_or_crude = "Gas"
+    pd.set_option("display.max_columns", None)
     combined_df = get_combined_df(gas_or_crude)
-    combined_df = combined_df
-    print(combined_df)
-    # pd.set_option('display.max_columns', None)
     normalized_df = stats.zscore(combined_df)
-    forecast(combined_df, normalized_df)
+    forecast(combined_df, normalized_df, gas_or_crude, view=150, forecast_out=10)
 
 
-def forecast(combined_df, normalized_df):
+def forecast(combined_df, normalized_df, gas_or_crude, view=100, forecast_out=10):
     # All factors
-    cols = ['U.S. Ending Stocks of Total Gasoline, Weekly',
-            'U.S. Ending Stocks of Gasoline Blending Components, Weekly',
-            'U.S. Ending Stocks of Fuel Ethanol, Weekly',
-            'U.S. Imports of Finished Motor Gasoline, Weekly',
-            'U.S. Percent Utilization of Refinery Operable Capacity, Weekly',
-            'U.S. Refiner and Blender Net Input of Fuel Ethanol, Weekly',
-            'U.S. Refiner and Blender Net Input of Gasoline Blending Components, Weekly',
-            'Approval Index', 'Days til Midterms', 'Days til Presidential', 'Close', 'Volume']
-    axes = combined_df[cols].plot(figsize=(11, 9), subplots=True)
-    plt.show()
+    if gas_or_crude == "Gas":
+        cols = ['U.S. Ending Stocks of Total Gasoline, Weekly',
+                'U.S. Ending Stocks of Gasoline Blending Components, Weekly',
+                'U.S. Ending Stocks of Fuel Ethanol, Weekly',
+                'U.S. Imports of Finished Motor Gasoline, Weekly',
+                'U.S. Percent Utilization of Refinery Operable Capacity, Weekly',
+                'U.S. Refiner and Blender Net Input of Fuel Ethanol, Weekly',
+                'U.S. Refiner and Blender Net Input of Gasoline Blending Components, Weekly',
+                'Approval Index', 'Days til Midterms', 'Days til Presidential', 'Fed Funds Rate',
+                'Interest Adj. Treasury Data', 'Adj Close', 'Volume']
+    else:
+        cols = ['U.S. Ending Stocks excluding SPR of Crude Oil, Weekly',
+                'U.S. Field Production of Crude Oil, Weekly',
+                'U.S. Imports of Crude Oil, Weekly',
+                'U.S. Product Supplied of Petroleum Products, Weekly',
+                'U.S. Operable Crude Oil Distillation Capacity, Weekly',
+                'U.S. Gross Inputs into Refineries, Weekly',
+                'U.S. Refiner Net Input of Crude Oil, Weekly',
+                'OPEC announced production increases/cuts ', 'OPEC actual production increases/cuts', 'Adj Close',
+                'Volume']
 
-    forecast_out = 10
-    print("Days forecasted out: ", forecast_out)
-    combined_df['label'] = combined_df['Close'].shift(forecast_out)
-    print(combined_df)
+    plot_attribute_subs(combined_df, cols)
 
-    scaler = StandardScaler()
-    scaler.fit(normalized_df)
-    X = scaler.transform(normalized_df)
+    combined_df['label'] = combined_df['Adj Close'].shift(forecast_out)
 
-    X_Predictions = X[(-forecast_out):]  # data to be predicted
-    X = X[:-forecast_out]  # data to be trained
-
-    combined_df.dropna(inplace=True)
-    y = np.array(combined_df['label'])
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test, X_Predictions = split_data(normalized_df, combined_df, forecast_out)
 
     rf = RandomForestRegressor()
     rf.fit(X_train, y_train)
     rf_confidence = rf.score(X_test, y_test)
 
-    names = ['Random Forest']
-    columns = ['model', 'accuracy']
-    scores = [rf_confidence]
-    alg_vs_score = pd.DataFrame([[x, y] for x, y in zip(names, scores)], columns=columns)
-    print(alg_vs_score)
+    print("Random Forest accuracy: ", rf_confidence)
 
     last_date = combined_df.index[-1]  # getting the last date in the dataset
     last_unix = last_date.timestamp()  # converting it to time in seconds
@@ -110,35 +111,144 @@ def forecast(combined_df, normalized_df):
         next_unix += 86400
         combined_df.loc[next_date] = [np.nan for _ in range(len(combined_df.columns) - 1)] + [i]
 
-    print(rf.feature_importances_)
+    plot_impact(rf, cols)
 
-    print(combined_df[['Close', 'Forecast']].tail(20))
-    plt.figure(figsize=(18, 8))
-    combined_df['Close'].tail(100).plot()
-    combined_df['Forecast'].plot()
-    plt.legend(loc=4)
-    plt.xlabel('Date')
-    plt.ylabel('Price')
-    plt.show()
+    print(combined_df[['Adj Close', 'Forecast']].tail(forecast_out))
+
+    plot_forecast(combined_df, view, gas_or_crude, forecast_out, cols)
+
+
+def split_data(normalized_df, combined_df, forecast_out):
+    scaler = StandardScaler()
+    scaler.fit(normalized_df)
+    X = scaler.transform(normalized_df)
+
+    X_Predictions = X[(-forecast_out):]  # data to be predicted
+    X = X[:-forecast_out]  # data to be trained
+
+    combined_df.dropna(inplace=True)
+    y = np.array(combined_df['label'])
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    return X_train, X_test, y_train, y_test, X_Predictions
+
+
+def plot_attribute_subs(combined_df, cols):
+    cols1 = cols[:7]
+    cols2 = cols[7:]
+
+    fig = make_subplots(rows=len(cols1), cols=1, shared_yaxes=False)
+
+    for i, attr in enumerate(cols1):
+        line = go.Scatter(x=combined_df.index, y=combined_df[attr], name=attr)
+        fig.add_trace(line, row=(i + 1), col=1)
+
+    fig.update_layout(
+        xaxis=dict(showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2),
+        yaxis=dict(title_text='', titlefont=dict(family='Rockwell', size=12, color='white'),
+                   showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2,
+                   ticks='outside', tickfont=dict(family='Rockwell', size=12, color='white')),
+        showlegend=True, template='plotly_dark')
+
+    annotations = [dict(xref='paper', yref='paper', x=0.0, y=1.05, xanchor='left', yanchor='bottom',
+                        text="EIA Report", font=dict(family='Rockwell', size=26, color='white'), showarrow=False)]
+    fig.update_layout(annotations=annotations)
+
+    fig.show()
+
+    fig = make_subplots(rows=len(cols2), cols=1, shared_yaxes=False)
+
+    for i, attr in enumerate(cols2):
+        line = go.Scatter(x=combined_df.index, y=combined_df[attr], name=attr)
+        fig.add_trace(line, row=(i + 1), col=1)
+
+    fig.update_layout(
+        xaxis=dict(showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2),
+        yaxis=dict(title_text='', titlefont=dict(family='Rockwell', size=12, color='white'),
+                   showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2,
+                   ticks='outside', tickfont=dict(family='Rockwell', size=12, color='white')),
+        showlegend=True, template='plotly_dark')
+
+    col_str = ""
+    for col in cols2:
+        col_str = col_str + col + ", "
+    col_str = col_str[:-2]
+
+    annotations = [dict(xref='paper', yref='paper', x=0.0, y=1.05, xanchor='left', yanchor='bottom',
+                        text=col_str, font=dict(family='Rockwell', size=26, color='white'), showarrow=False)]
+    fig.update_layout(annotations=annotations)
+
+    fig.show()
+
+
+def plot_forecast(combined_df, view, gas_or_crude, forecast_out, cols):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(go.Scatter(x=combined_df.tail(view).index, y=combined_df['Adj Close'].tail(view),
+                                        mode='lines', name='Price')))
+    fig.add_trace(go.Scatter(x=combined_df.tail(view).index, y=combined_df['Forecast'].tail(view), mode='lines',
+                             name='Forecast'))
+
+    fig.update_layout(
+        xaxis=dict(showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2),
+        yaxis=dict(title_text='Price (USD)', titlefont=dict(family='Rockwell', size=12, color='white'),
+                   showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2,
+                   ticks='outside', tickfont=dict(family='Rockwell', size=12, color='white')),
+        showlegend=True, template='plotly_dark')
+
+    col_str = "EIA Reports, "
+    for col in cols[7:]:
+        col_str = col_str + col + ", "
+    col_str = col_str[:-2]
+
+    annotations = [dict(xref='paper', yref='paper', x=0.0, y=1.05, xanchor='left', yanchor='bottom',
+                        text='U.S. {} {} Day Forecast'.format(gas_or_crude, forecast_out), font=dict(family='Rockwell',
+                                                                                                     size=26,
+                                                                                                     color='white'),
+                        showarrow=False),
+                   dict(xref='paper', yref='paper', x=0.4, y=1.05, xanchor='left', yanchor='bottom',
+                        text='Forecast based on {}'.format(col_str), font=dict(family='Rockwell',
+                                                                               size=16,
+                                                                               color='white'), showarrow=False)]
+    fig.update_layout(annotations=annotations)
+
+    fig.show()
+
+
+def plot_impact(rf, cols):
+    feats = rf.feature_importances_
+    feat_df = pd.DataFrame(feats, index=cols, columns=["Importance"])
+    feat_df = feat_df[feat_df.index != "Adj Close"]
+
+    fig = go.Figure(data=[go.Bar(x=feat_df.index, y=feat_df["Importance"])],
+                    layout_title_text="Attribute Impact")
+    fig.update_layout(
+        xaxis=dict(showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2),
+        yaxis=dict(title_text='Impact', titlefont=dict(family='Rockwell', size=12, color='white'),
+                   showline=True, showgrid=True, showticklabels=True, linecolor='white', linewidth=2,
+                   ticks='outside', tickfont=dict(family='Rockwell', size=12, color='white')),
+        showlegend=True, template='plotly_dark')
+
+    fig.show()
 
 
 def get_combined_df(gas_or_crude):
-    eia_choice = GAS_EIA
     if gas_or_crude == "Gas":
-        eia_choice = GAS_EIA
-    elif gas_or_crude == "Crude":
-        eia_choice = CRUDE_EIA
+        eia_data = get_eia_data(GAS_EIA, EIA_API)
+        pres_data = get_pres_appr_data()
+        election_data = get_days_til_election_data()
+        fed_data = get_fed_funds_rate_data(NDL_API, START_DATE)
+        treas_data = get_int_adj_10yr_treas_data(NDL_API, START_DATE)
 
-    eia_data = get_eia_data(eia_choice, EIA_API)
-    pres_data = get_pres_appr_data()
-    election_data = get_days_til_election_data()
-    # fed_data = get_fed_funds_rate_data(NDL_API, START_DATE)
-    # treas_data = get_int_adj_10yr_treas_data(NDL_API, START_DATE)
-    # combined_data = pres_data
-    combined_data = pd.merge(eia_data, pres_data, left_index=True, right_index=True)
-    combined_data = pd.merge(combined_data, election_data, left_index=True, right_index=True)
-    # combined_data = pd.merge(combined_data, fed_data, left_index=True, right_index=True)
-    # combined_data = pd.merge(combined_data, treas_data, left_index=True, right_index=True)
+        combined_data = pd.merge(eia_data, pres_data, left_index=True, right_index=True)
+        combined_data = pd.merge(combined_data, election_data, left_index=True, right_index=True)
+        combined_data = pd.merge(combined_data, fed_data, left_index=True, right_index=True)
+        combined_data = pd.merge(combined_data, treas_data, left_index=True, right_index=True)
+
+    else:
+        eia_data = get_eia_data(CRUDE_EIA, EIA_API)
+        pres_data = get_pres_appr_data()
+        combined_data = pd.merge(eia_data, pres_data, left_index=True, right_index=True)
 
     price_data = get_price(gas_or_crude, combined_data)
 
@@ -164,7 +274,7 @@ def get_price(gas_or_crude, combined_df):
     price = price.drop('Open', axis=1)
     price = price.drop('High', axis=1)
     price = price.drop('Low', axis=1)
-    price = price.drop('Adj Close', axis=1)
+    price = price.drop('Close', axis=1)
 
     price.index = price.index.strftime("%Y%m%d")
     price.index = price.index.astype(int)
@@ -213,17 +323,12 @@ def fill_eia_data(eia_data, code_dict):
 
 def get_eia_data(code_dict, api_key):
     output = pd.DataFrame()
-    loaded = False
+
     for key in code_dict.keys():
         url = 'https://api.eia.gov/series/?api_key=' + api_key + '&series_id=' + code_dict[key]
-        while not loaded:
-            print("ATTEMPTING TO LOAD EIA DATA")
-            r = requests.get(url=url)
-            try:
-                data = np.array(r.json()['series'][0]['data'])
-                loaded = True
-            except json.JSONDecodeError:
-                print("FAILED ATTEMPT")
+        print("ATTEMPTING TO LOAD EIA DATA")
+        r = requests.get(url=url)
+        data = np.array(r.json()['series'][0]['data'])
         df = pd.DataFrame(data=data, columns=['date', key])
         df = df.iloc[::-1]
         df.index = df.date
@@ -474,6 +579,57 @@ def get_days_til_election_data():
     return combined_df
 
 
+def fill_fed_data(fed_data):
+    new_df = fed_data.head(1)
+    beg_date = int(new_df.index[0])
+    index_list = [beg_date]
+    fed_data.index = fed_data.index.astype(int).astype(str)
+    fed_index = fed_data.index.tolist()
+    curr_date = datetime.strptime(str(int(fed_data.index[0])), "%Y%m%d").date()
+
+    count = 0
+    i = 0
+
+    end_date = datetime.strptime(fed_index[-1], "%Y%m%d").date()
+    end_date = end_date + timedelta(days=1)
+    end_date = end_date.strftime("%Y%m%d")
+
+    while curr_date.strftime("%Y%m%d") != end_date:
+
+        if str(curr_date.strftime("%Y%m%d")) not in fed_index:
+            count += 1
+            new_vals = []
+            prev = float(new_df['Fed Funds Rate'].loc[new_df.index[i]])
+            new_vals.append(prev)
+
+            # Create new rows with interpolated values
+            row = pd.Series(new_vals, index=new_df.columns)
+            new_df = new_df.append(row, ignore_index=True)
+
+            index_list.append(int(str(curr_date.strftime("%Y%m%d"))))
+            new_df.index = index_list
+
+            new_vals.clear()
+        else:
+            new_vals = []
+            curr = (fed_data['Fed Funds Rate'].loc[fed_data.index[i - count]])
+            new_vals.append(curr)
+
+            # Create new rows with interpolated values
+            row = pd.Series(new_vals, index=new_df.columns)
+            new_df = new_df.append(row, ignore_index=True)
+
+            index_list.append(int(str(curr_date.strftime("%Y%m%d"))))
+            new_df.index = index_list
+
+            new_vals.clear()
+
+        curr_date = curr_date + timedelta(days=1)
+        i += 1
+
+    return new_df.iloc[1:]
+
+
 def get_fed_funds_rate_data(api_key, start_date):
     ndl.read_key(api_key)
     fed_funds = ndl.get("FED/RIFSPFF_N_B", start_date=start_date)
@@ -482,7 +638,75 @@ def get_fed_funds_rate_data(api_key, start_date):
 
     fed_funds.columns = ['Fed Funds Rate']
 
+    fed_funds = fed_funds.astype(float)
+
+    fed_funds = fill_fed_data(fed_funds)
+
+    index_list = fed_funds.index.tolist()
+
+    last_date = index_list[-1]
+    last_datetime = datetime.strptime(str(last_date), "%Y%m%d")
+
+    while last_datetime <= datetime.now():
+        fed_funds = fed_funds.append(fed_funds.tail(1), ignore_index=True)
+
+        index_list.append(int(last_datetime.strftime("%Y%m%d")))
+        fed_funds.index = index_list
+
+        last_datetime = last_datetime + timedelta(days=1)
+
     return fed_funds
+
+
+def fill_treas_data(t10ii):
+    new_df = t10ii.head(1)
+    beg_date = int(new_df.index[0])
+    index_list = [beg_date]
+    t10ii.index = t10ii.index.astype(int).astype(str)
+    fed_index = t10ii.index.tolist()
+    curr_date = datetime.strptime(str(int(t10ii.index[0])), "%Y%m%d").date()
+
+    count = 0
+    i = 0
+
+    end_date = datetime.strptime(fed_index[-1], "%Y%m%d").date()
+    end_date = end_date + timedelta(days=1)
+    end_date = end_date.strftime("%Y%m%d")
+
+    while curr_date.strftime("%Y%m%d") != end_date:
+
+        if str(curr_date.strftime("%Y%m%d")) not in fed_index:
+            count += 1
+            new_vals = []
+            prev = float(new_df['Interest Adj. Treasury Data'].loc[new_df.index[i]])
+            new_vals.append(prev)
+
+            # Create new rows with interpolated values
+            row = pd.Series(new_vals, index=new_df.columns)
+            new_df = new_df.append(row, ignore_index=True)
+
+            index_list.append(int(str(curr_date.strftime("%Y%m%d"))))
+            new_df.index = index_list
+
+            new_vals.clear()
+        else:
+            new_vals = []
+            curr = (t10ii['Interest Adj. Treasury Data'].loc[t10ii.index[i - count]])
+            new_vals.append(curr)
+
+            # Create new rows with interpolated values
+            row = pd.Series(new_vals, index=new_df.columns)
+            new_df = new_df.append(row, ignore_index=True)
+
+            index_list.append(int(str(curr_date.strftime("%Y%m%d"))))
+            new_df.index = index_list
+
+            new_vals.clear()
+
+        curr_date = curr_date + timedelta(days=1)
+        i += 1
+
+    return new_df.iloc[1:]
 
 
 def get_int_adj_10yr_treas_data(api_key, start_date):
@@ -493,7 +717,32 @@ def get_int_adj_10yr_treas_data(api_key, start_date):
 
     t10ii.columns = ['Interest Adj. Treasury Data']
 
+    t10ii = t10ii.astype(float)
+
+    t10ii = fill_treas_data(t10ii)
+
+    index_list = t10ii.index.tolist()
+
+    last_date = index_list[-1]
+    last_datetime = datetime.strptime(str(last_date), "%Y%m%d")
+
+    while last_datetime <= datetime.now():
+        t10ii = t10ii.append(t10ii.tail(1), ignore_index=True)
+
+        index_list.append(int(last_datetime.strftime("%Y%m%d")))
+        t10ii.index = index_list
+
+        last_datetime = last_datetime + timedelta(days=1)
+
     return t10ii
+
+
+def get_opec_announced():
+    pass
+
+
+def get_opec_actual():
+    pass
 
 
 if __name__ == "__main__":
