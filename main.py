@@ -47,7 +47,7 @@ CRUDE_EIA = {
     'U.S. Refiner Net Input of Crude Oil, Weekly': 'PET.WCRRIUS2.W',
 }
 
-START_DATE = '20100718'
+START_DATE = '20120718'
 EIA_API = 'LPJxIMy69I8faXYsn4Ggo0z93f1SMXTwBxSiqvTh'
 NDL_API = 'tH1_rNukQF2kHwQxi1xH'
 FRED_API = '115cf5baf63cb8d94c61290db6e49ed4'
@@ -62,10 +62,10 @@ def main():
     pd.set_option("display.max_columns", None)
     combined_df = get_combined_df(gas_or_crude)
     normalized_df = stats.zscore(combined_df)
-    forecast(combined_df, normalized_df, gas_or_crude, view=150, forecast_out=10)
+    forecast(combined_df, normalized_df, gas_or_crude)
 
 
-def forecast(combined_df, normalized_df, gas_or_crude, view=100, forecast_out=10):
+def forecast(combined_df, normalized_df, gas_or_crude, view=150, forecast_out=10):
     # All factors
     if gas_or_crude == "Gas":
         cols = ['U.S. Ending Stocks of Total Gasoline, Weekly',
@@ -206,7 +206,7 @@ def plot_forecast(combined_df, view, gas_or_crude, forecast_out, cols):
                                                                                                      size=26,
                                                                                                      color='white'),
                         showarrow=False),
-                   dict(xref='paper', yref='paper', x=0.4, y=1.05, xanchor='left', yanchor='bottom',
+                   dict(xref='paper', yref='paper', x=0.3, y=1.05, xanchor='left', yanchor='bottom',
                         text='Forecast based on {}'.format(col_str), font=dict(family='Rockwell',
                                                                                size=16,
                                                                                color='white'), showarrow=False)]
